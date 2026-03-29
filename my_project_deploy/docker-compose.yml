@@ -1,0 +1,87 @@
+name: ${COMPOSE_PROJECT_NAME:-enc-chat-docker}
+
+services:
+  # 数据库服务
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-enc_chat_root_password}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-enc_chat_db}
+      MYSQL_USER: ${MYSQL_USER:-enc_chat}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-enc_chat_password}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: [ "CMD-SHELL", "mysqladmin ping -h localhost -uroot -p$$MYSQL_ROOT_PASSWORD --silent" ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    networks:
+      - enc_chat_net
+
+  # FastAPI 后端服务
+  backend:
+    image: enc-chat-docker-backend:latest
+    restart: unless-stopped
+    environment:
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_USER: ${MYSQL_USER:-enc_chat}
+      DB_PASSWORD: ${MYSQL_PASSWORD:-enc_chat_password}
+      DB_NAME: ${MYSQL_DATABASE:-enc_chat_db}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-}
+      DB_ENCRYPTION_KEY: ${DB_ENCRYPTION_KEY:-}
+      E2EE_PRIVATE_ENABLED: ${E2EE_PRIVATE_ENABLED:-true}
+      E2EE_GROUP_ENABLED: ${E2EE_GROUP_ENABLED:-true}
+      APP_DATA_DIR: /data
+      AVATAR_DIR: /data/avatars
+      GROUP_AVATAR_DIR: /data/group_avatars
+      APP_LOG_PATH: /data/app.log
+      SERVER_PRIVATE_KEY_FILE: /data/server_private.pem
+    volumes:
+      - backend_data:/data
+    depends_on:
+      mysql:
+        condition: service_healthy
+    healthcheck:
+      test: [ "CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/').read()\"" ]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - enc_chat_net
+
+  # 前端静态资源与本地 TLS 入口
+  frontend:
+    image: enc-chat-docker-frontend:latest
+    restart: unless-stopped
+    environment:
+      BACKEND_UPSTREAM: backend:8000
+      SERVER_NAME: ${SERVER_NAME:-localhost}
+      TLS_COMMON_NAME: ${TLS_COMMON_NAME:-localhost}
+      TLS_DOMAINS: ${TLS_DOMAINS:-localhost,127.0.0.1}
+      TLS_CERT_DAYS: ${TLS_CERT_DAYS:-825}
+    ports:
+      - ${APP_PORT:-23456}:443
+    volumes:
+      - frontend_tls:/etc/nginx/certs
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - enc_chat_net
+
+volumes:
+  mysql_data:
+  backend_data:
+  frontend_tls:
+
+networks:
+  enc_chat_net:
+    driver: bridge

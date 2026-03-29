@@ -1,0 +1,86 @@
+name: enc-chat-canary
+
+services:
+  mysql-canary:
+    image: mysql:8.4
+    restart: unless-stopped
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    environment:
+      MYSQL_ROOT_PASSWORD: enc_chat_root_password
+      MYSQL_DATABASE: enc_chat_db
+      MYSQL_USER: enc_chat
+      MYSQL_PASSWORD: enc_chat_password
+    volumes:
+      - mysql_data_canary:/var/lib/mysql
+    healthcheck:
+      test: [ "CMD-SHELL", "mysqladmin ping -h localhost -uroot -p$$MYSQL_ROOT_PASSWORD --silent" ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    networks:
+      - enc_chat_net_canary
+
+  backend-canary:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      DB_HOST: mysql-canary
+      DB_PORT: 3306
+      DB_USER: enc_chat
+      DB_PASSWORD: enc_chat_password
+      DB_NAME: enc_chat_db
+      JWT_SECRET_KEY: "canary_jwt_secret_key_1234567890_super_safe"
+      DB_ENCRYPTION_KEY: "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+      E2EE_PRIVATE_ENABLED: "true"
+      E2EE_GROUP_ENABLED: "true"
+      APP_DATA_DIR: /data
+      APP_LOG_PATH: /data/app.log
+      SERVER_PRIVATE_KEY_FILE: /data/server_private.pem
+    volumes:
+      - backend_data_canary:/data
+    depends_on:
+      mysql-canary:
+        condition: service_healthy
+    healthcheck:
+      test: [ "CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/').read()\"" ]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - enc_chat_net_canary
+
+  frontend-canary:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      BACKEND_UPSTREAM: backend-canary:8000
+      SERVER_NAME: localhost
+      TLS_COMMON_NAME: localhost
+      TLS_DOMAINS: localhost,127.0.0.1
+      TLS_CERT_DAYS: 825
+    ports:
+      - 23457:443
+    volumes:
+      - frontend_tls_canary:/etc/nginx/certs
+    depends_on:
+      backend-canary:
+        condition: service_healthy
+    networks:
+      - enc_chat_net_canary
+
+volumes:
+  mysql_data_canary:
+  backend_data_canary:
+  frontend_tls_canary:
+
+networks:
+  enc_chat_net_canary:
+    driver: bridge

@@ -1,0 +1,25 @@
+{
+  "cookies": [
+    {
+      "name": "refresh_token",
+      "value": "W3-5EfKIa-WB5_jbEyJ45Y9bOh6bDxUy9qtQKMNwPqJY4Q4ik-dcbVUiTiJYJ5U5",
+      "domain": "localhost",
+      "path": "/",
+      "expires": 1777287833.492353,
+      "httpOnly": true,
+      "secure": false,
+      "sameSite": "Lax"
+    }
+  ],
+  "origins": [
+    {
+      "origin": "https://localhost:3000",
+      "localStorage": [
+        {
+          "name": "username",
+          "value": "playwrightA1"
+        }
+      ]
+    }
+  ]
+}

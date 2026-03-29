@@ -1,0 +1,25 @@
+.env
+.venv/
+.git/
+.idea/
+avatars/
+group_avatars/
+device_backups/
+uploaded_files/
+uploaded_files_v2/
+app.log
+server_private.pem
+secrets/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Databases and Local Volumes
+*.sqlite
+*.sqlite3
+*.db
+app_db.sqlite
+mysql_data/
+mysql/

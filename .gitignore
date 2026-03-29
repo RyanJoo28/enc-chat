@@ -1,0 +1,64 @@
+# ====== GLOBAL ======
+.idea/
+.vscode/
+*.suo
+*.sln
+.DS_Store
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+*.tar
+*.zip
+tmp/
+certs/
+
+# ====== GLOBAL CACHES ======
+.pytest_cache/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# ====== BACKEND (Python / FastAPI) ======
+backend/.venv/
+backend/.env
+backend/app.log
+backend/uploaded_files/
+backend/uploaded_files_v2/
+backend/avatars/
+backend/group_avatars/
+backend/device_backups/
+backend/server_private.pem
+*.sqlite
+*.sqlite3
+app_db.sqlite
+
+# ====== FRONTEND (Vue / Node.js) ======
+frontend/node_modules/
+frontend/dist/
+frontend/dist-ssr/
+frontend/coverage/
+frontend/.env.local
+frontend/.env.*.local
+frontend/*.tsbuildinfo
+frontend/.eslintcache
+frontend/cypress/videos/
+frontend/cypress/screenshots/
+frontend/__screenshots__/
+
+# ====== DOCKER ======
+docker/mysql_data/
+docker/backend_data/
+docker/frontend_tls/
+docker/.env
+
+# ====== E2E & PLAYWRIGHT ======
+e2e/node_modules/
+e2e/test-results/
+e2e/playwright-report/
+e2e/playwright/.cache/
+e2e/blob-report/
+e2e/.env
