@@ -1,5 +1,9 @@
 FROM python:3.13-slim
 
+LABEL org.opencontainers.image.source="https://github.com/RyanJoo28/enc-chat" \
+      org.opencontainers.image.description="Enc Chat backend image" \
+      org.opencontainers.image.licenses="AGPL-3.0-only"
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 

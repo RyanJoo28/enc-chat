@@ -43,6 +43,46 @@ docker-compose --env-file docker/.env up -d --build
 https://localhost:23456
 ```
 
+## 📦 GHCR Release Deployment
+
+The deployment bundle in `my_project_deploy/` pulls prebuilt images from GitHub Container Registry (GHCR). The compose file supports overriding the image references through `BACKEND_IMAGE` and `FRONTEND_IMAGE`, so the same bundle can be reused for the upstream project, forks, and private re-publishes.
+
+For a deployment-only guide, see `my_project_deploy/README.md`.
+For air-gapped deployment using the release archive, see `my_project_deploy/README.offline.md`.
+
+```bash
+# Optional: copy the deployment env template and adjust image overrides if needed
+cp my_project_deploy/.env.example my_project_deploy/.env
+
+# If the images are private, authenticate first with a classic PAT that has read:packages
+echo "$CR_PAT" | docker login ghcr.io -u <github-username> --password-stdin
+
+cd my_project_deploy
+docker compose pull
+docker compose up -d
+
+# Or use the helper scripts
+./start.sh
+# Windows: start.bat
+```
+
+Image naming convention:
+
+- `ghcr.io/<github-namespace>/enc-chat-backend:<tag>`
+- `ghcr.io/<github-namespace>/enc-chat-frontend:<tag>`
+
+Notes:
+
+- If `BACKEND_IMAGE` and `FRONTEND_IMAGE` are not set, Docker Compose uses the default image values committed in `my_project_deploy/docker-compose.yml`.
+- Public GHCR images can be pulled anonymously; private GHCR images require `docker login ghcr.io`.
+
+To stop the release stack:
+
+```bash
+cd my_project_deploy
+docker compose down
+```
+
 ## 📂 Project Structure (Monorepo)
 
 ```text

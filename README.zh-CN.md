@@ -43,6 +43,46 @@ docker-compose --env-file docker/.env up -d --build
 https://localhost:23456
 ```
 
+## 📦 通过 GHCR 部署发布版
+
+`my_project_deploy/` 目录下的部署包会从 GitHub Container Registry (GHCR) 拉取预构建镜像。`docker-compose.yml` 支持通过 `BACKEND_IMAGE` 和 `FRONTEND_IMAGE` 覆盖镜像地址，因此同一套部署文件既可以用于上游仓库，也可以用于 fork 或私有重新发布的镜像。
+
+如果你只需要查看部署说明，请直接参考 `my_project_deploy/README.md`。
+如果你需要使用发布归档进行离线部署，请参考 `my_project_deploy/README.offline.zh-CN.md`。
+
+```bash
+# 可选：先复制部署环境模板，再按需修改镜像覆盖项
+cp my_project_deploy/.env.example my_project_deploy/.env
+
+# 如果镜像还是 private，需要先使用带 read:packages 权限的 classic PAT 登录
+echo "$CR_PAT" | docker login ghcr.io -u <github-username> --password-stdin
+
+cd my_project_deploy
+docker compose pull
+docker compose up -d
+
+# 或直接使用辅助脚本
+./start.sh
+# Windows: start.bat
+```
+
+镜像命名约定：
+
+- `ghcr.io/<github-namespace>/enc-chat-backend:<tag>`
+- `ghcr.io/<github-namespace>/enc-chat-frontend:<tag>`
+
+说明：
+
+- 如果没有设置 `BACKEND_IMAGE` 和 `FRONTEND_IMAGE`，Docker Compose 会使用 `my_project_deploy/docker-compose.yml` 中提交的默认镜像值。
+- 公有 GHCR 镜像可以匿名拉取；私有 GHCR 镜像需要先执行 `docker login ghcr.io`。
+
+停止发布栈：
+
+```bash
+cd my_project_deploy
+docker compose down
+```
+
 ## 📂 项目结构概览 (Monorepo)
 
 ```text

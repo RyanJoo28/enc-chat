@@ -1,5 +1,9 @@
 FROM node:20-alpine AS build
 
+LABEL org.opencontainers.image.source="https://github.com/RyanJoo28/enc-chat" \
+      org.opencontainers.image.description="Enc Chat frontend image" \
+      org.opencontainers.image.licenses="AGPL-3.0-only"
+
 WORKDIR /app
 
 # 构建阶段
@@ -11,6 +15,10 @@ COPY . .
 RUN npm run build
 
 FROM nginx:1.27-alpine
+
+LABEL org.opencontainers.image.source="https://github.com/RyanJoo28/enc-chat" \
+      org.opencontainers.image.description="Enc Chat frontend image" \
+      org.opencontainers.image.licenses="AGPL-3.0-only"
 
 # 运行阶段
 # 运行阶段使用 Nginx 并生成本地 TLS 证书。
