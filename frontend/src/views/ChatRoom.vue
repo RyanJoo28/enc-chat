@@ -1097,6 +1097,8 @@ import {
   getGroupPreviewEntry,
   getGroupPreviewMap,
   getPrivatePreviewEntry,
+  removeGroupPreviewEntry,
+  removePrivatePreviewEntry,
   replaceGroupPreviewMap,
   saveGroupPreviewEntry,
   savePrivatePreviewEntry,
@@ -2214,6 +2216,55 @@ const pickLatestTimestamp = (...values) => {
   return winner;
 };
 
+const getConversationPreviewTimestamp = (conversationItem) => {
+  return conversationItem?.last_message_created_at || conversationItem?.last_message_at || null;
+};
+
+const getMatchedConversationContact = (contact, conversationId) => {
+  if (!contact || !conversationId) {
+    return null;
+  }
+  return Number(contact.e2eeConversationId) === Number(conversationId) ? contact : null;
+};
+
+const isPreviewEntryAlignedWithConversation = (previewEntry, conversationItem) => {
+  if (!previewEntry?.timestamp) {
+    return false;
+  }
+  const previewTimestamp = getConversationPreviewTimestamp(conversationItem);
+  if (!previewTimestamp) {
+    return false;
+  }
+  return getTimestampMs(previewEntry.timestamp) === getTimestampMs(previewTimestamp);
+};
+
+const getValidatedPrivatePreviewEntry = (conversationItem) => {
+  const previewScope = getPreviewStorageScope();
+  const previewEntry = getPrivatePreviewEntry(myUserId, conversationItem.partner_id, previewScope);
+  if (!previewEntry) {
+    return null;
+  }
+  if (isPreviewEntryAlignedWithConversation(previewEntry, conversationItem)) {
+    return previewEntry;
+  }
+  removePrivatePreviewEntry(myUserId, conversationItem.partner_id, previewScope);
+  return null;
+};
+
+const getValidatedGroupPreviewEntry = (conversationItem) => {
+  const previewScope = getPreviewStorageScope();
+  const previewEntry = getGroupPreviewEntry(myUserId, conversationItem.group_id, previewScope);
+  if (!previewEntry) {
+    return null;
+  }
+  if (conversationItem?.last_message_type !== 'sender_key_distribution'
+      && isPreviewEntryAlignedWithConversation(previewEntry, conversationItem)) {
+    return previewEntry;
+  }
+  removeGroupPreviewEntry(myUserId, conversationItem.group_id, previewScope);
+  return null;
+};
+
 const getConversationActivityTimestamp = (contact) => {
   const activityTs = getTimestampMs(contact?.lastActivityAt);
   if (activityTs) {
@@ -2685,8 +2736,11 @@ const updatePrivateConversationRecallPreview = (partnerId, createdAt, isOwnMessa
 };
 
 const upsertE2EEConversationContact = (conversationItem) => {
-  const previewEntry = getPrivatePreviewEntry(myUserId, conversationItem.partner_id, getPreviewStorageScope());
-  const existing = contactList.value.find((item) => item.id === conversationItem.partner_id && item.type === 'private');
+  const previewEntry = getValidatedPrivatePreviewEntry(conversationItem);
+  const existing = getMatchedConversationContact(
+    contactList.value.find((item) => item.id === conversationItem.partner_id && item.type === 'private'),
+    conversationItem.id,
+  );
   const recalledPreview = conversationItem.last_message_is_recalled
     ? buildConversationRecallPreview({
       chatType: 'private',
@@ -2835,8 +2889,11 @@ const mergeConversationOutboxMessages = async (conversationMessages, contact) =>
 };
 
 const upsertE2EEGroupConversationContact = (conversationItem) => {
-  const previewEntry = getGroupPreviewEntry(myUserId, conversationItem.group_id, getPreviewStorageScope());
-  const existing = contactList.value.find((item) => item.id === conversationItem.group_id && item.type === 'group');
+  const previewEntry = getValidatedGroupPreviewEntry(conversationItem);
+  const existing = getMatchedConversationContact(
+    contactList.value.find((item) => item.id === conversationItem.group_id && item.type === 'group'),
+    conversationItem.id,
+  );
   const recalledPreview = conversationItem.last_message_is_recalled
     ? buildConversationRecallPreview({
       chatType: 'group',
@@ -4442,8 +4499,11 @@ const loadContacts = async () => {
         if (!sessionFeatureFlags.e2ee_group_enabled) {
           return;
         }
-        const existingGroupContact = contactList.value.find((item) => item.id === conversationItem.group_id && item.type === 'group');
-        const previewEntry = getGroupPreviewEntry(myUserId, conversationItem.group_id, getPreviewStorageScope());
+        const existingGroupContact = getMatchedConversationContact(
+          contactList.value.find((item) => item.id === conversationItem.group_id && item.type === 'group'),
+          conversationItem.id,
+        );
+        const previewEntry = getValidatedGroupPreviewEntry(conversationItem);
         const recalledPreview = conversationItem.last_message_is_recalled
           ? buildConversationRecallPreview({
             chatType: 'group',
@@ -4475,8 +4535,11 @@ const loadContacts = async () => {
         return;
       }
 
-      const existingPrivateContact = contactList.value.find((item) => item.id === conversationItem.partner_id && item.type === 'private');
-      const previewEntry = getPrivatePreviewEntry(myUserId, conversationItem.partner_id, getPreviewStorageScope());
+      const existingPrivateContact = getMatchedConversationContact(
+        contactList.value.find((item) => item.id === conversationItem.partner_id && item.type === 'private'),
+        conversationItem.id,
+      );
+      const previewEntry = getValidatedPrivatePreviewEntry(conversationItem);
       const recalledPreview = conversationItem.last_message_is_recalled
         ? buildConversationRecallPreview({
           chatType: 'private',

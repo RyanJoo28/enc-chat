@@ -60,6 +60,12 @@ export const replacePrivatePreviewMap = (userId, previewMap, scopeKey = 'default
   savePreviewMap(userId, scopeKey, previewMap && typeof previewMap === 'object' ? previewMap : {});
 };
 
+export const removePrivatePreviewEntry = (userId, partnerId, scopeKey = 'default') => {
+  const previewMap = loadPreviewMap(userId, scopeKey);
+  delete previewMap[String(partnerId)];
+  savePreviewMap(userId, scopeKey, previewMap);
+};
+
 export const getGroupPreviewEntry = (userId, groupId, scopeKey = 'default') => {
   return loadGroupPreviewMap(userId, scopeKey)[String(groupId)] || null;
 };
@@ -80,4 +86,10 @@ export const getGroupPreviewMap = (userId, scopeKey = 'default') => {
 
 export const replaceGroupPreviewMap = (userId, previewMap, scopeKey = 'default') => {
   saveGroupPreviewMap(userId, scopeKey, previewMap && typeof previewMap === 'object' ? previewMap : {});
+};
+
+export const removeGroupPreviewEntry = (userId, groupId, scopeKey = 'default') => {
+  const previewMap = loadGroupPreviewMap(userId, scopeKey);
+  delete previewMap[String(groupId)];
+  saveGroupPreviewMap(userId, scopeKey, previewMap);
 };

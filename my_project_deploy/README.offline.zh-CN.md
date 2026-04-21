@@ -76,6 +76,8 @@ docker compose logs -f
 
 ## 说明
 
+- 如果缺少 `.env`，`start.sh` 和 `start.bat` 会自动根据 `.env.example` 创建默认配置
+- 部署包默认使用 `COMPOSE_PROJECT_NAME=enc-chat-release`，避免复用开发环境的 Docker volumes
 - 离线模式下不要运行 `docker compose pull`
 - `./start.sh offline` 和 `start.bat offline` 会自动加载 `enc-chat-release.tar`，并强制使用离线包内的本地镜像标签
 - 如果 `.env` 中没有设置 `BACKEND_IMAGE` 和 `FRONTEND_IMAGE`，Docker Compose 会回退到 `docker-compose.yml` 中的 GHCR 镜像地址

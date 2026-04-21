@@ -19,6 +19,11 @@ esac
 backend_image_override=""
 frontend_image_override=""
 
+if [ ! -f ".env" ] && [ -f ".env.example" ]; then
+  cp .env.example .env
+  echo "未检测到 .env，已根据 .env.example 创建默认配置。"
+fi
+
 if [ -f ".env" ]; then
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in

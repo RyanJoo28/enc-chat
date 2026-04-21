@@ -10,6 +10,12 @@ if /i not "%MODE%"=="online" if /i not "%MODE%"=="offline" goto :usage
 set "BACKEND_IMAGE_OVERRIDE="
 set "FRONTEND_IMAGE_OVERRIDE="
 
+if not exist ".env" if exist ".env.example" (
+  copy /Y ".env.example" ".env" >nul
+  if errorlevel 1 goto :error
+  echo No .env found. Created default settings from .env.example.
+)
+
 if exist ".env" (
   for /f "usebackq tokens=1,* delims==" %%A in (".env") do (
     if /i "%%A"=="BACKEND_IMAGE" set "BACKEND_IMAGE_OVERRIDE=%%B"

@@ -1,4 +1,4 @@
-name: ${COMPOSE_PROJECT_NAME:-enc-chat-docker}
+name: ${COMPOSE_PROJECT_NAME:-enc-chat-release}
 
 services:
   # 数据库服务

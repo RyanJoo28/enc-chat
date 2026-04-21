@@ -76,6 +76,8 @@ docker compose logs -f
 
 ## Notes
 
+- If `.env` is missing, `start.sh` and `start.bat` create it from `.env.example` automatically.
+- The deployment bundle defaults to `COMPOSE_PROJECT_NAME=enc-chat-release` so it does not reuse the development stack's Docker volumes.
 - Do not run `docker compose pull` in offline mode.
 - `./start.sh offline` and `start.bat offline` automatically load `enc-chat-release.tar` and force the bundled local image tags.
 - If `.env` does not set `BACKEND_IMAGE` and `FRONTEND_IMAGE`, Docker Compose falls back to the GHCR image references in `docker-compose.yml`.

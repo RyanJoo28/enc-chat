@@ -84,6 +84,8 @@ docker compose logs -f
 
 ## Notes
 
+- If `.env` is missing, `start.sh` and `start.bat` create it from `.env.example` automatically.
+- The deployment bundle defaults to `COMPOSE_PROJECT_NAME=enc-chat-release` so it does not reuse the development stack's Docker volumes.
 - Current startup scripts pull images from GHCR; they do not load `enc-chat-release.tar`.
 - Run `./start.sh offline` or `start.bat offline` to load `enc-chat-release.tar` and start without pulling from GHCR.
 - Public GHCR images can be pulled anonymously; private images require `docker login ghcr.io`.

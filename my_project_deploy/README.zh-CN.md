@@ -84,6 +84,8 @@ docker compose logs -f
 
 ## 说明
 
+- 如果缺少 `.env`，`start.sh` 和 `start.bat` 会自动根据 `.env.example` 创建默认配置
+- 部署包默认使用 `COMPOSE_PROJECT_NAME=enc-chat-release`，避免复用开发环境的 Docker volumes
 - 默认启动脚本会从 GHCR 拉取镜像；如果要使用离线包，请运行 `./start.sh offline` 或 `start.bat offline`
 - 公有 GHCR 镜像可匿名拉取；私有镜像需要先执行 `docker login ghcr.io`
 - 应用和数据库数据保存在 Docker volumes 中
