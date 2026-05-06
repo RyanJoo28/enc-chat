@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 from .log_utils import build_log_payload, log_event
 
 FILE_ENCRYPTION_MAGIC = b"ENCFILE1"
+HMAC_SIZE = 32  # bytes
 DB_DECRYPTION_FAILED_PLACEHOLDER = "[解密失败]"
 PLAINTEXT_FILE_SIGNATURES = {
     ".png": (b"\x89PNG\r\n\x1a\n",),
@@ -41,6 +42,9 @@ except ValueError:
 
 if len(DB_SECRET_KEY) != 32:
     raise ValueError("DB_ENCRYPTION_KEY 长度错误，解码后必须是 32 字节 (即 .env 中要有 64 个字符)")
+
+# 文件加密的 HMAC 密钥（通过 domain separation 派生，避免与 DB 密钥直接共用）
+_DB_FILE_HMAC_KEY = hmac.digest(DB_SECRET_KEY, b"enc-chat:file-hmac", "sha256")
 
 
 def db_encrypt(plaintext: str) -> str:
@@ -124,15 +128,17 @@ def build_blind_index_hashes(value: str, namespace: str, max_token_length: int =
 
 
 def encrypt_file_content(file_bytes: bytes) -> bytes:
-    """加密二进制文件内容。"""
+    """加密二进制文件内容（AES-256-CBC + HMAC-SHA256 认证）。"""
     iv = get_random_bytes(16)
     cipher = AES.new(DB_SECRET_KEY, AES.MODE_CBC, iv)
     ciphertext = cipher.encrypt(pad(file_bytes, AES.block_size))
-    return FILE_ENCRYPTION_MAGIC + iv + ciphertext
+    body = iv + ciphertext
+    tag = hmac.digest(_DB_FILE_HMAC_KEY, FILE_ENCRYPTION_MAGIC + body, "sha256")
+    return FILE_ENCRYPTION_MAGIC + body + tag
 
 
 def decrypt_file_content(encrypted_bytes: bytes, allow_plaintext_fallback: bool = False) -> bytes:
-    """解密二进制文件内容。"""
+    """解密二进制文件内容，验证 HMAC。兼容旧版无 HMAC 格式。"""
     payload = encrypted_bytes
     if encrypted_bytes.startswith(FILE_ENCRYPTION_MAGIC):
         payload = encrypted_bytes[len(FILE_ENCRYPTION_MAGIC):]
@@ -140,11 +146,22 @@ def decrypt_file_content(encrypted_bytes: bytes, allow_plaintext_fallback: bool 
         return encrypted_bytes
 
     try:
-        if len(payload) <= 16:
+        has_hmac = len(payload) > 16 + HMAC_SIZE
+        if has_hmac:
+            signed_body = payload[:-HMAC_SIZE]
+            expected_tag = payload[-HMAC_SIZE:]
+            actual_tag = hmac.digest(_DB_FILE_HMAC_KEY, FILE_ENCRYPTION_MAGIC + signed_body, "sha256")
+            if not hmac.compare_digest(actual_tag, expected_tag):
+                raise ValueError("File HMAC verification failed")
+            body = signed_body
+        else:
+            body = payload
+
+        if len(body) <= 16:
             raise ValueError("Encrypted payload is too short")
 
-        iv = payload[:16]
-        ciphertext = payload[16:]
+        iv = body[:16]
+        ciphertext = body[16:]
         cipher = AES.new(DB_SECRET_KEY, AES.MODE_CBC, iv)
         plaintext = unpad(cipher.decrypt(ciphertext), AES.block_size)
         return plaintext

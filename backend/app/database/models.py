@@ -17,7 +17,7 @@ class User(Base):
     id = Column(Integer, primary_key=True, index=True)
     _username = Column("username", String(1024), nullable=False)
     username_hash = Column(String(64), unique=True, nullable=True, index=True)
-    password = Column(String(100), nullable=False)
+    _password = Column("password", String(512), nullable=False)
     _avatar = Column("avatar", String(2048), nullable=True)
     session_version = Column(Integer, nullable=False, default=0)
     e2ee_enabled = Column(Boolean, nullable=False, default=False)
@@ -32,6 +32,16 @@ class User(Base):
         encryption = _encryption_module()
         self._username = encryption.db_encrypt(value)
         self.username_hash = encryption.metadata_hash(value, case_insensitive=True, namespace="user.username")
+
+    @property
+    def password(self) -> str:
+        encryption = _encryption_module()
+        return encryption.db_decrypt(self._password)
+
+    @password.setter
+    def password(self, value: str):
+        encryption = _encryption_module()
+        self._password = encryption.db_encrypt(value)
 
     @property
     def avatar(self) -> str | None:
@@ -192,9 +202,24 @@ class GroupJoinRequest(Base):
     group_id = Column(Integer, ForeignKey("groups.id", ondelete="CASCADE"), nullable=False, index=True)
     requester_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     status = Column(String(20), nullable=False, default="pending", index=True)
-    note = Column(String(255), nullable=True)
+    _note = Column("note", String(1024), nullable=True)
     created_at = Column(DateTime, default=datetime.now)
     responded_at = Column(DateTime, nullable=True)
+
+    @property
+    def note(self) -> str | None:
+        if self._note is None:
+            return None
+        encryption = _encryption_module()
+        return encryption.db_decrypt(self._note)
+
+    @note.setter
+    def note(self, value: str | None):
+        if value is None:
+            self._note = None
+        else:
+            encryption = _encryption_module()
+            self._note = encryption.db_encrypt(value)
 
 
 class TokenBlacklist(Base):
@@ -315,8 +340,18 @@ class MessagePayload(Base):
     recipient_device_id = Column(Integer, ForeignKey("devices.id", ondelete="CASCADE"), nullable=False, index=True)
     envelope_type = Column(String(32), nullable=False, default="signal")
     protocol_version = Column(String(32), nullable=False, default="e2ee_v1")
-    envelope = Column(Text, nullable=False)
+    _envelope = Column("envelope", Text, nullable=False)
     created_at = Column(DateTime, default=datetime.now)
+
+    @property
+    def envelope(self) -> str:
+        encryption = _encryption_module()
+        return encryption.db_decrypt(self._envelope)
+
+    @envelope.setter
+    def envelope(self, value: str):
+        encryption = _encryption_module()
+        self._envelope = encryption.db_encrypt(value)
 
 
 class MessageDelivery(Base):
@@ -406,13 +441,28 @@ class AuthSession(Base):
     user_session_version = Column(Integer, nullable=False, default=0)
     status = Column(String(20), nullable=False, default="active", index=True)
     user_agent = Column(String(512), nullable=True)
-    ip_address = Column(String(64), nullable=True)
+    _ip_address = Column("ip_address", String(200), nullable=True)
     last_used_at = Column(DateTime, nullable=True)
     expires_at = Column(DateTime, nullable=False)
     revoked_at = Column(DateTime, nullable=True)
     rotated_from_session_id = Column(Integer, ForeignKey("auth_sessions.id", ondelete="SET NULL"), nullable=True)
     replaced_by_session_id = Column(Integer, ForeignKey("auth_sessions.id", ondelete="SET NULL"), nullable=True)
     created_at = Column(DateTime, default=datetime.now)
+
+    @property
+    def ip_address(self) -> str | None:
+        if self._ip_address is None:
+            return None
+        encryption = _encryption_module()
+        return encryption.db_decrypt(self._ip_address)
+
+    @ip_address.setter
+    def ip_address(self, value: str | None):
+        if value is None:
+            self._ip_address = None
+        else:
+            encryption = _encryption_module()
+            self._ip_address = encryption.db_encrypt(value)
 
 
 ACTIVE_BOOTSTRAP_TABLES = [

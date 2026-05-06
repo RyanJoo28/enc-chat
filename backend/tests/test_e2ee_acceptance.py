@@ -75,6 +75,8 @@ def _make_signal_envelope(ciphertext: str, *, sender_device_id: str, counter: in
         "mode": "message",
         "sender_device_id": sender_device_id,
         "counter": counter,
+        "previous_counter": 0,
+        "dh_ratchet_key": '{"kty":"OKP","crv":"X25519","x":"test"}',
         "nonce": "bm9uY2U=",
         "ciphertext": ciphertext,
     }, ensure_ascii=False, separators=(",", ":"))

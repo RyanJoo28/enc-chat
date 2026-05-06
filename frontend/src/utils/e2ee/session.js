@@ -4,6 +4,8 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
 const emptySalt = new Uint8Array(32);
+const MAX_SKIP = 1000;
+const MAX_USED_MESSAGE_KEYS = 50;
 
 const toBase64 = (buffer) => {
   const bytes = new Uint8Array(buffer);
@@ -47,6 +49,14 @@ const importEd25519PublicKey = async (jwk) => {
 };
 
 const generateEphemeralKeyPair = async () => {
+  const keyPair = await window.crypto.subtle.generateKey({name: 'X25519'}, true, ['deriveBits']);
+  return {
+    publicJwk: await window.crypto.subtle.exportKey('jwk', keyPair.publicKey),
+    privateJwk: await window.crypto.subtle.exportKey('jwk', keyPair.privateKey),
+  };
+};
+
+const generateRatchetKeyPair = async () => {
   const keyPair = await window.crypto.subtle.generateKey({name: 'X25519'}, true, ['deriveBits']);
   return {
     publicJwk: await window.crypto.subtle.exportKey('jwk', keyPair.publicKey),
@@ -105,12 +115,106 @@ const deriveInitialChains = async (rootKey, isInitiator) => {
   };
 };
 
+const performDhRatchet = async (rootKeyBytes, myPrivateJwk, theirPublicJwk) => {
+  const dh = await deriveDh(myPrivateJwk, theirPublicJwk);
+  const material = await hkdfExpand(
+    concatUint8Arrays(dh, rootKeyBytes),
+    'enc-chat:ratchet:v2',
+    64,
+  );
+  return {
+    rootKeyBase64: toBase64(material.slice(0, 32)),
+    chainKeyBase64: toBase64(material.slice(32, 64)),
+  };
+};
+
+const stepDHratchet = async (state, remoteRatchetPublicKey) => {
+  state.recvCounter = 0;
+
+  const remoteRatchetPubJwk = JSON.parse(remoteRatchetPublicKey);
+  const result = await performDhRatchet(
+    fromBase64(state.rootKey),
+    state.sendingRatchetKeyPair.privateJwk,
+    remoteRatchetPubJwk,
+  );
+
+  state.rootKey = result.rootKeyBase64;
+  state.recvChainKey = result.chainKeyBase64;
+  state.receivingRatchetPublic = remoteRatchetPublicKey;
+
+  return state;
+};
+
+const skipReceiveChainKeys = async (state, targetCounter) => {
+  while (state.recvCounter < targetCounter) {
+    const step = await deriveNextStep(state.recvChainKey);
+    const ratchetPrefix = (state.receivingRatchetPublic || 'initial').substring(0, 32);
+    if (!state.skippedKeys) {
+      state.skippedKeys = {};
+    }
+    if (!state.usedMessageKeys) {
+      state.usedMessageKeys = {};
+    }
+    if (Object.keys(state.skippedKeys).length >= MAX_SKIP) {
+      throw new Error('消息跳跃过多');
+    }
+    const keyB64 = toBase64(step.messageKey);
+    state.skippedKeys[`${ratchetPrefix}:${state.recvCounter}`] = keyB64;
+    state.usedMessageKeys[`${ratchetPrefix}:${state.recvCounter}`] = keyB64;
+    state.recvChainKey = step.nextChainKey;
+    state.recvCounter++;
+  }
+  return state;
+};
+
 const deriveNextStep = async (chainKeyBase64) => {
   const material = await hkdfExpand(fromBase64(chainKeyBase64), 'enc-chat:chain:step', 64);
   return {
     nextChainKey: toBase64(material.slice(0, 32)),
     messageKey: material.slice(32, 64),
   };
+};
+
+const tryUsedMessageKeys = async (state, envelope) => {
+  const dhPrefix = (envelope.dh_ratchet_key || 'initial').substring(0, 32);
+  const skipKey = `${dhPrefix}:${envelope.counter}`;
+  
+  if (state.usedPlaintexts && state.usedPlaintexts[skipKey]) {
+    return state.usedPlaintexts[skipKey];
+  }
+
+  if (!state.usedMessageKeys) {
+    return null;
+  }
+  const messageKeyBase64 = state.usedMessageKeys[skipKey];
+  if (!messageKeyBase64) {
+    return null;
+  }
+  try {
+    return await decryptPayload(fromBase64(messageKeyBase64), envelope.nonce, envelope.ciphertext);
+  } catch {
+    return null;
+  }
+};
+
+const trySkippedMessageKeys = async (state, envelope) => {
+  if (!state.skippedKeys || !envelope) {
+    return null;
+  }
+  const dhPrefix = (envelope.dh_ratchet_key || 'initial').substring(0, 32);
+  const skipKey = `${dhPrefix}:${envelope.counter}`;
+  const messageKeyBase64 = state.skippedKeys[skipKey];
+  if (!messageKeyBase64) {
+    return null;
+  }
+  if (!state.usedMessageKeys) state.usedMessageKeys = {};
+  state.usedMessageKeys[skipKey] = messageKeyBase64;
+  delete state.skippedKeys[skipKey];
+  try {
+    return await decryptPayload(fromBase64(messageKeyBase64), envelope.nonce, envelope.ciphertext);
+  } catch {
+    return null;
+  }
 };
 
 const encryptPayload = async (messageKeyBytes, plaintext) => {
@@ -147,15 +251,30 @@ const deriveLocalMessageKey = async (deviceState) => {
   );
 };
 
-const cloneSessionForReplay = (sessionState) => ({
-  ...sessionState,
-  sendChainKey: sessionState.initialSendChainKey,
-  recvChainKey: sessionState.initialRecvChainKey,
-  sendCounter: 0,
-  recvCounter: 0,
-});
+export const deriveCacheEncryptionKey = async (deviceState) => {
+  return await hkdfExpand(
+    encoder.encode(JSON.stringify(deviceState.identityKeyPair.privateJwk)),
+    'enc-chat:plaintext-cache-key',
+    32,
+  );
+};
 
-const buildStoredSession = async ({
+const trimSessionState = (state) => {
+  delete state.usedPlaintexts;
+  if (state.usedMessageKeys) {
+    const keys = Object.keys(state.usedMessageKeys);
+    if (keys.length > MAX_USED_MESSAGE_KEYS) {
+      const toRemove = keys.slice(0, keys.length - MAX_USED_MESSAGE_KEYS);
+      for (const key of toRemove) {
+        delete state.usedMessageKeys[key];
+      }
+    }
+  }
+};
+
+// Removed replay functions that violate forward secrecy / ratchet state continuity
+
+export const buildStoredSession = async ({
   deviceState,
   myUserId,
   remoteUserId,
@@ -167,10 +286,26 @@ const buildStoredSession = async ({
   isInitiator,
   rootKey,
   ephemeralKeyPair = null,
+  initialReceivingRatchetPublic = null,
 }) => {
   const chains = await deriveInitialChains(rootKey, isInitiator);
-  return {
-    version: 1,
+  const rootKeyBase64 = toBase64(rootKey);
+
+  let sendingRatchetKeyPair;
+  if (isInitiator && ephemeralKeyPair) {
+    sendingRatchetKeyPair = {
+      privateJwk: ephemeralKeyPair.privateJwk,
+      publicJwk: ephemeralKeyPair.publicJwk,
+    };
+  } else if (ephemeralKeyPair) {
+    sendingRatchetKeyPair = {
+      privateJwk: ephemeralKeyPair.privateJwk,
+      publicJwk: ephemeralKeyPair.publicJwk,
+    };
+  }
+
+  const session = {
+    version: 2,
     sessionId,
     myDeviceId: deviceState.deviceId,
     myUserId,
@@ -184,9 +319,23 @@ const buildStoredSession = async ({
     isInitiator,
     sendCounter: 0,
     recvCounter: 0,
+    previousSendCounter: 0,
+    rootKey: rootKeyBase64,
+    initialRootKey: rootKeyBase64,
+    sendingRatchetKeyPair,
+    initialSendingRatchetKeyPair: sendingRatchetKeyPair
+      ? {privateJwk: sendingRatchetKeyPair.privateJwk, publicJwk: sendingRatchetKeyPair.publicJwk}
+      : null,
+    receivingRatchetPublic: initialReceivingRatchetPublic,
+    initialReceivingRatchetPublic: initialReceivingRatchetPublic,
+    lastAckedReceivingRatchetPublic: null,
+    skippedKeys: {},
+    usedMessageKeys: {},
     ...chains,
-  ephemeralKeyPair,
+    ephemeralKeyPair,
   };
+  
+  return session;
 };
 
 const hasIdentityMismatch = (sessionState, identityKeyPublic) => {
@@ -260,6 +409,7 @@ export const createInitiatorSession = async ({scopeKey, deviceState, remoteUserI
     isInitiator: true,
     rootKey,
     ephemeralKeyPair,
+    initialReceivingRatchetPublic: null,
   });
 
   await saveDeviceSession(scopeKey, bundleDevice.device_id, sessionState);
@@ -267,34 +417,77 @@ export const createInitiatorSession = async ({scopeKey, deviceState, remoteUserI
 };
 
 export const encryptOutgoingMessage = async ({scopeKey, sessionState, plaintext}) => {
-  const step = await deriveNextStep(sessionState.sendChainKey);
+  const isFirstPrekeyMessage = sessionState.sendCounter === 0
+    && sessionState.previousSendCounter === 0
+    && sessionState.isInitiator
+    && Boolean(sessionState.ephemeralKeyPair);
+
+
+  let nextState = {...sessionState};
+  let didDhRatchet = false;
+
+  if (!isFirstPrekeyMessage && nextState.ephemeralKeyPair) {
+    delete nextState.ephemeralKeyPair;
+  }
+
+  // Only perform a DH ratchet when the remote ratchet public key has changed
+  // since we last ratcheted (i.e., we received a new key from the remote party).
+  const needsDhRatchet = !isFirstPrekeyMessage
+    && nextState.receivingRatchetPublic
+    && nextState.receivingRatchetPublic !== nextState.lastAckedReceivingRatchetPublic;
+
+  if (needsDhRatchet) {
+    // Generate a new sending ratchet key pair
+    const newRatchetKeyPair = await generateRatchetKeyPair();
+    const theirPubJwk = JSON.parse(nextState.receivingRatchetPublic);
+
+    // Perform DH ratchet to derive a new send chain
+    const result = await performDhRatchet(
+      fromBase64(nextState.rootKey),
+      newRatchetKeyPair.privateJwk,
+      theirPubJwk,
+    );
+
+    nextState.rootKey = result.rootKeyBase64;
+    nextState.sendChainKey = result.chainKeyBase64;
+    nextState.sendingRatchetKeyPair = newRatchetKeyPair;
+    nextState.previousSendCounter = nextState.sendCounter;
+    nextState.sendCounter = 0;
+    nextState.lastAckedReceivingRatchetPublic = nextState.receivingRatchetPublic;
+    didDhRatchet = true;
+  }
+
+  const step = await deriveNextStep(nextState.sendChainKey);
   const encrypted = await encryptPayload(step.messageKey, plaintext);
 
   const envelope = {
     version: 'e2ee_v1',
-    mode: sessionState.sendCounter === 0 && sessionState.isInitiator && sessionState.ephemeralKeyPair ? 'prekey' : 'message',
-    session_id: sessionState.sessionId,
-    counter: sessionState.sendCounter,
-    sender_device_id: sessionState.myDeviceId,
-    recipient_device_id: sessionState.remoteDeviceId,
+    mode: isFirstPrekeyMessage ? 'prekey' : 'message',
+    session_id: nextState.sessionId,
+    counter: nextState.sendCounter,
+    previous_counter: nextState.previousSendCounter || 0,
+    dh_ratchet_key: JSON.stringify(nextState.sendingRatchetKeyPair.publicJwk),
+    sender_device_id: nextState.myDeviceId,
+    recipient_device_id: nextState.remoteDeviceId,
     nonce: encrypted.nonce,
     ciphertext: encrypted.ciphertext,
   };
 
-  const nextState = {
-    ...sessionState,
-    sendChainKey: step.nextChainKey,
-    sendCounter: sessionState.sendCounter + 1,
-  };
-
-  if (envelope.mode === 'prekey') {
-    envelope.sender_identity_key = JSON.stringify(sessionState.localIdentityKeyPublic || {});
-    envelope.sender_ephemeral_key = JSON.stringify(sessionState.ephemeralKeyPair.publicJwk);
-    envelope.recipient_signed_prekey_id = sessionState.remoteSignedPrekeyId;
-    envelope.recipient_one_time_prekey_id = sessionState.remoteOneTimePrekeyId;
+  if (isFirstPrekeyMessage) {
+    envelope.sender_identity_key = JSON.stringify(nextState.localIdentityKeyPublic || {});
+    envelope.sender_ephemeral_key = JSON.stringify(nextState.ephemeralKeyPair.publicJwk);
+    envelope.recipient_signed_prekey_id = nextState.remoteSignedPrekeyId;
+    envelope.recipient_one_time_prekey_id = nextState.remoteOneTimePrekeyId;
   }
 
-  await saveDeviceSession(scopeKey, sessionState.remoteDeviceId, nextState);
+  nextState.sendChainKey = step.nextChainKey;
+  nextState.sendCounter = nextState.sendCounter + 1;
+
+  if (isFirstPrekeyMessage) {
+    delete nextState.ephemeralKeyPair;
+  }
+
+  await saveDeviceSession(scopeKey, nextState.remoteDeviceId, nextState);
   return {envelope, sessionState: nextState};
 };
 
@@ -352,6 +545,9 @@ const rebuildIncomingSession = async (deviceState, envelope) => {
   }
 
   const rootKey = await hkdfExpand(concatUint8Arrays(...secretParts), 'enc-chat:x3dh', 32);
+  const newRatchetKeyPair = await generateRatchetKeyPair();
+  const initiatorRatchetPublic = envelope.sender_ephemeral_key;
+
   return await buildStoredSession({
     deviceState,
     myUserId: deviceState.userId,
@@ -363,32 +559,42 @@ const rebuildIncomingSession = async (deviceState, envelope) => {
     sessionId: envelope.session_id,
     isInitiator: false,
     rootKey,
+    ephemeralKeyPair: newRatchetKeyPair,
+    initialReceivingRatchetPublic: initiatorRatchetPublic,
   });
 };
 
 const advanceReceiveChain = async (sessionState, targetCounter) => {
-  let state = {...sessionState};
-  while (state.recvCounter <= targetCounter) {
-    const step = await deriveNextStep(state.recvChainKey);
-    if (state.recvCounter === targetCounter) {
-      return {
-        state: {
-          ...state,
-          recvChainKey: step.nextChainKey,
-          recvCounter: state.recvCounter + 1,
-        },
-        messageKey: step.messageKey,
-      };
-    }
+  if (sessionState.recvCounter > targetCounter) {
+    throw new Error('消息计数器过期');
+  }
+  if (targetCounter - sessionState.recvCounter > MAX_SKIP) {
+    throw new Error('消息跳跃过大');
+  }
 
-    state = {
+  let state = {...sessionState};
+  state = await skipReceiveChainKeys(state, targetCounter);
+
+  const step = await deriveNextStep(state.recvChainKey);
+  const ratchetPrefix = (state.receivingRatchetPublic || 'initial').substring(0, 32);
+  if (!state.usedMessageKeys) {
+    state.usedMessageKeys = {};
+  }
+  state.usedMessageKeys[`${ratchetPrefix}:${state.recvCounter}`] = toBase64(step.messageKey);
+
+  return {
+    state: {
       ...state,
       recvChainKey: step.nextChainKey,
       recvCounter: state.recvCounter + 1,
-    };
-  }
+    },
+    messageKey: step.messageKey,
+  };
+};
 
-  throw new Error('消息计数器无效');
+const isSessionVersionValid = (sessionState) => {
+  if (!sessionState) return false;
+  return sessionState.version >= 2 && sessionState.rootKey && sessionState.sendingRatchetKeyPair;
 };
 
 export const decryptEnvelopeForHistory = async ({deviceState, sessionState, envelope, metadata}) => {
@@ -399,7 +605,8 @@ export const decryptEnvelopeForHistory = async ({deviceState, sessionState, enve
     };
   }
 
-  let workingSession = sessionState;
+  let workingSession = sessionState && isSessionVersionValid(sessionState) ? sessionState : null;
+  
   if (shouldRebuildIncomingSession(workingSession, envelope)) {
     workingSession = null;
   }
@@ -413,13 +620,53 @@ export const decryptEnvelopeForHistory = async ({deviceState, sessionState, enve
     throw new Error(`缺少会话状态 (mode=${envelope.mode}, sender_device=${envelope.sender_device_id}, has_existing=${Boolean(sessionState)})`);
   }
 
-  const replaySession = cloneSessionForReplay(workingSession);
-  const result = await advanceReceiveChain(replaySession, envelope.counter);
-  const plaintext = await decryptPayload(result.messageKey, envelope.nonce, envelope.ciphertext);
-  return {
-    sessionState: result.state,
-    plaintext,
-  };
+  if (workingSession.ephemeralKeyPair && (workingSession.sendCounter > 0 || workingSession.previousSendCounter > 0)) {
+    delete workingSession.ephemeralKeyPair;
+  }
+
+  let plaintext = await tryUsedMessageKeys(workingSession, envelope);
+  if (plaintext !== null) {
+    return {
+      sessionState: workingSession,
+      plaintext,
+    };
+  } else {
+    console.warn(`[E2EE-DEBUG] tryUsedMessageKeys returned null for msg_counter=${envelope.counter}`);
+  }
+
+  plaintext = await trySkippedMessageKeys(workingSession, envelope);
+  if (plaintext !== null) {
+    return {
+      sessionState: workingSession,
+      plaintext,
+    };
+  }
+
+  if (envelope.dh_ratchet_key && envelope.dh_ratchet_key !== workingSession.receivingRatchetPublic) {
+    const pn = envelope.previous_counter || 0;
+    if (workingSession.recvCounter < pn) {
+      console.error(`[E2EE-DEBUG] skipReceiveChainKeys called in history: current=${workingSession.recvCounter}, target=${pn}`);
+      await skipReceiveChainKeys(workingSession, pn);
+    }
+    await stepDHratchet(workingSession, envelope.dh_ratchet_key);
+  }
+
+  try {
+    const result = await advanceReceiveChain(workingSession, envelope.counter);
+    try {
+      plaintext = await decryptPayload(result.messageKey, envelope.nonce, envelope.ciphertext);
+    } catch (err) {
+      console.error(`[E2EE-DEBUG] decryptPayload failed in history. counter=${envelope.counter}`);
+      throw err;
+    }
+    return {
+      sessionState: result.state,
+      plaintext,
+    };
+  } catch (err) {
+    console.error(`[E2EE-DEBUG] decryptEnvelopeForHistory failed entirely:`, err);
+    throw err;
+  }
 };
 
 export const decryptIncomingEnvelope = async ({scopeKey, deviceState, envelope, metadata}) => {
@@ -431,6 +678,12 @@ export const decryptIncomingEnvelope = async ({scopeKey, deviceState, envelope, 
   }
 
   let sessionState = await loadDeviceSession(scopeKey, envelope.sender_device_id);
+  const sessionExists = isSessionVersionValid(sessionState);
+  if (!sessionExists) {
+    sessionState = null;
+  }
+  
+  let didRebuild = false;
   if (shouldRebuildIncomingSession(sessionState, envelope)) {
     sessionState = null;
   }
@@ -439,13 +692,48 @@ export const decryptIncomingEnvelope = async ({scopeKey, deviceState, envelope, 
       ...envelope,
       sender_user_id: metadata.sender_user_id,
     });
+    didRebuild = true;
   }
   if (!sessionState) {
     throw new Error(`缺少会话状态 (mode=${envelope.mode}, sender_device=${envelope.sender_device_id}, has_stored=false)`);
   }
 
-  const result = await advanceReceiveChain(sessionState, envelope.counter);
-  const plaintext = await decryptPayload(result.messageKey, envelope.nonce, envelope.ciphertext);
+  if (sessionState.ephemeralKeyPair && (sessionState.sendCounter > 0 || sessionState.previousSendCounter > 0)) {
+    delete sessionState.ephemeralKeyPair;
+    await saveDeviceSession(scopeKey, envelope.sender_device_id, sessionState);
+  }
+
+  let workingState = {...sessionState};
+
+  let plaintext = await tryUsedMessageKeys(workingState, envelope);
+  if (plaintext !== null) {
+    return {
+      sessionState: workingState,
+      plaintext,
+    };
+  }
+
+  plaintext = await trySkippedMessageKeys(workingState, envelope);
+  if (plaintext !== null) {
+    await saveDeviceSession(scopeKey, envelope.sender_device_id, workingState);
+    return {
+      sessionState: workingState,
+      plaintext,
+    };
+  }
+
+  if (workingState && envelope.dh_ratchet_key && envelope.dh_ratchet_key !== workingState.receivingRatchetPublic) {
+    const pn = envelope.previous_counter || 0;
+    if (workingState.recvCounter < pn) {
+      await skipReceiveChainKeys(workingState, pn);
+    }
+    await stepDHratchet(workingState, envelope.dh_ratchet_key);
+  }
+
+  const result = await advanceReceiveChain(workingState, envelope.counter);
+  plaintext = await decryptPayload(result.messageKey, envelope.nonce, envelope.ciphertext);
+
+  trimSessionState(result.state);
   await saveDeviceSession(scopeKey, envelope.sender_device_id, result.state);
   return {
     sessionState: result.state,

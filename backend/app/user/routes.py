@@ -1,3 +1,4 @@
+from hashlib import sha256
 from typing import List
 import uuid
 
@@ -144,9 +145,10 @@ async def logout(
         revoke_auth_session(db, auth_context.auth_session)
 
     if token and (auth_context is None or auth_context.auth_session is None):
-        exists = db.query(TokenBlacklist).filter(TokenBlacklist.token == token).first()
+        token_hash = sha256(token.encode()).hexdigest()
+        exists = db.query(TokenBlacklist).filter(TokenBlacklist.token == token_hash).first()
         if not exists:
-            db.add(TokenBlacklist(token=token))
+            db.add(TokenBlacklist(token=token_hash))
             db.commit()
 
     clear_refresh_cookie(response)

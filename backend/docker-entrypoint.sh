@@ -53,4 +53,36 @@ fi
 # 将运行所需配置导出给应用进程。
 export JWT_SECRET_KEY DB_ENCRYPTION_KEY APP_DATA_DIR APP_LOG_PATH SERVER_PRIVATE_KEY_FILE
 
+# 等待数据库就绪后再启动应用，避免模块级 create_all 在 MySQL 未完全可用时崩溃。
+if [ -n "${DB_HOST:-}" ]; then
+  echo "Waiting for database ${DB_HOST}:${DB_PORT:-3306} ..."
+  python - <<'PY'
+import os, sys, time
+
+host = os.environ["DB_HOST"]
+port = int(os.environ.get("DB_PORT", 3306))
+user = os.environ.get("DB_USER", "root")
+password = os.environ.get("DB_PASSWORD", "")
+database = os.environ.get("DB_NAME", "")
+timeout = 60
+start = time.monotonic()
+
+import pymysql
+
+while True:
+    elapsed = time.monotonic() - start
+    if elapsed >= timeout:
+        print(f"ERROR: Database not reachable after {timeout}s, aborting.", file=sys.stderr)
+        sys.exit(1)
+    try:
+        conn = pymysql.connect(host=host, port=port, user=user, password=password, database=database, connect_timeout=5)
+        conn.close()
+        print(f"Database is ready (waited {elapsed:.1f}s).")
+        break
+    except Exception as exc:
+        print(f"  DB not ready ({elapsed:.0f}s): {exc}")
+        time.sleep(2)
+PY
+fi
+
 exec "$@"

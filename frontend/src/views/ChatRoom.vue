@@ -477,10 +477,10 @@
               <div v-if="isMessageRecalled(msg)" class="message-content recalled-message-content">{{ getRecalledMessageText(msg) }}</div>
               <div v-else-if="getMsgType(msg) === 'text'" class="message-content">{{ msg.content }}</div>
               <div v-else-if="getMsgType(msg) === 'image'" class="message-image">
-                <img :src="getFileUrl(msg.content)" alt="image" @click.stop="previewImage(msg.content)" />
-                <div v-if="usesMediaMetaOverlay(msg)" class="media-meta-overlay">
-                  <span class="media-meta-name" :style="getGroupSenderRibbonStyle(msg)">{{ msg.username }}</span>
-                  <span class="media-meta-time">{{ getMessageTimeLabel(msg) }}</span>
+                <img v-if="getFileUrl(msg.content)" :src="getFileUrl(msg.content)" alt="image" @click.stop="previewImage(msg.content)" />
+                <div v-else class="image-loading-placeholder">
+                  <span v-if="isAttachmentLoadFailed(msg.content)" class="load-failed-text">{{ t('imageLoadFailed') }}</span>
+                  <span v-else class="loading-spinner-text">{{ t('imageLoading') }}</span>
                 </div>
               </div>
               <div v-else class="message-file">
@@ -492,7 +492,7 @@
                 </div>
               </div>
 
-              <div v-if="getMessageTimeLabel(msg) && !usesMediaMetaOverlay(msg)" class="bubble-footer" :class="{ 'media-footer': isImageMessage(msg) }">
+              <div v-if="getMessageTimeLabel(msg)" class="bubble-footer" :class="{ 'media-footer': isImageMessage(msg) }">
                 <span>{{ getMessageTimeLabel(msg) }}</span>
                 <div v-if="!isMessageRecalled(msg) && msg.from === myUserId && currentChatType === 'group'" class="bubble-read-status" @click="openReadReceiptPopover($event, msg)" :title="getGroupReadSummaryTitle(msg)">
                   <span class="bubble-status-text">{{ getDeliveryStatusLabel(msg) }}</span>
@@ -1109,21 +1109,27 @@ import {
   createInitiatorSession,
   decryptEnvelopeForHistory,
   decryptIncomingEnvelope,
+  deriveCacheEncryptionKey,
   encryptLocalEnvelope,
   encryptOutgoingMessage,
   listDeviceSessions,
   loadDeviceSession,
 } from '../utils/e2ee/session';
 import {
+  clearCachedPlaintexts,
   clearGroupSenderKeyStates,
   clearOutboxMessages,
   clearStoredDeviceState,
   clearStoredSessionState,
   clearStoredSessionStates,
   listOutboxMessages,
+  loadCachedPlaintextBatch,
   loadOutboxMessage,
   loadStoredDeviceState,
+  removeCachedPlaintext,
   removeOutboxMessage,
+  saveCachedPlaintext,
+  saveCachedPlaintextBatch,
   saveOutboxMessage,
   saveStoredDeviceState,
 } from '../utils/e2ee/storage';
@@ -1370,7 +1376,9 @@ const translations = {
     delivered: 'Delivered',
     read: 'Read',
     failed: 'Failed',
-    retry: 'Retry'
+    retry: 'Retry',
+    imageLoading: 'Loading image…',
+    imageLoadFailed: 'Image failed to load'
   },
   zh: {
     search: '搜索用户或群组',
@@ -1512,7 +1520,9 @@ const translations = {
     delivered: '已送达',
     read: '已读',
     failed: '发送失败',
-    retry: '重发'
+    retry: '重发',
+    imageLoading: '图片加载中…',
+    imageLoadFailed: '图片加载失败'
   }
 };
 
@@ -1558,6 +1568,7 @@ const getRecalledMessageText = (message) => {
 const showViewer = ref(false);
 const previewUrl = ref('');
 const attachmentObjectUrls = reactive({});
+const attachmentLoadErrors = reactive({});
 const attachmentLoadPromises = new Map();
 
 const previewImage = async (content) => {
@@ -1908,9 +1919,7 @@ const isIncomingGroupMessage = (msg) => currentChatType.value === 'group' && msg
 
 const isImageMessage = (msg) => getMsgType(msg) === 'image';
 
-const usesMediaMetaOverlay = (msg) => isIncomingGroupMessage(msg) && isImageMessage(msg);
-
-const shouldShowGroupBubbleHeader = (msg) => isIncomingGroupMessage(msg) && !usesMediaMetaOverlay(msg);
+const shouldShowGroupBubbleHeader = (msg) => isIncomingGroupMessage(msg);
 
 const getGroupSenderTheme = (msg) => {
   const seed = `${msg.username || ''}:${msg.from || 0}`;
@@ -1919,10 +1928,6 @@ const getGroupSenderTheme = (msg) => {
 
 const getGroupSenderNameStyle = (msg) => ({
   color: getGroupSenderTheme(msg).text,
-});
-
-const getGroupSenderRibbonStyle = (msg) => ({
-  '--sender-accent': getGroupSenderTheme(msg).text,
 });
 
 const getMessageTimeLabel = (msg) => {
@@ -2577,6 +2582,7 @@ const rebindCurrentBrowserDevice = async (serverDevice, activeDeviceCount) => {
   await clearStoredSessionStates(recoverySessionScope);
   await clearGroupSenderKeyStates(recoverySessionScope);
   await clearOutboxMessages(recoverySessionScope);
+  await clearCachedPlaintexts(recoverySessionScope);
 
   const replacementState = await generateDeviceState({
     deviceId: serverDevice?.device_id,
@@ -2654,6 +2660,17 @@ const ensureDeviceBootstrap = async () => {
 const getSessionStorageScope = () => `user:${myUserId || 'guest'}:device:${currentDeviceId.value || 'unknown'}`;
 const getPreviewStorageScope = () => currentDeviceId.value || 'default';
 
+let _cacheKeyPromise = null;
+let _cacheKeyDeviceId = null;
+const getCacheEncryptionKey = async () => {
+  if (!currentDeviceState.value) return null;
+  const deviceId = currentDeviceState.value.deviceId;
+  if (_cacheKeyPromise && _cacheKeyDeviceId === deviceId) return _cacheKeyPromise;
+  _cacheKeyDeviceId = deviceId;
+  _cacheKeyPromise = deriveCacheEncryptionKey(currentDeviceState.value);
+  return _cacheKeyPromise;
+};
+
 const updateCurrentDeviceActiveCount = async (nextCount) => {
   if (!currentDeviceState.value || !Number.isFinite(Number(nextCount))) {
     return;
@@ -2678,6 +2695,7 @@ const handleCurrentDeviceRevoked = async () => {
     await clearOutboxMessages(sessionScope).catch(console.error);
     await clearStoredSessionStates(sessionScope).catch(console.error);
     await clearGroupSenderKeyStates(sessionScope).catch(console.error);
+    await clearCachedPlaintexts(sessionScope).catch(console.error);
   }
   await clearStoredDeviceState(getDeviceStorageScope()).catch(console.error);
   await logoutSession().catch(() => {});
@@ -2991,39 +3009,95 @@ const decryptE2EEMessageList = async (items) => {
   }
 
   const sessionScope = getSessionStorageScope();
-  const sessionSnapshots = new Map();
   const decryptedMessages = [];
+
+  // Phase 1: try loading all plaintexts from local cache
+  const cacheKey = await getCacheEncryptionKey();
+  const nonRecalledIds = items.filter((item) => !item.is_recalled).map((item) => item.message_id);
+  const cachedPlaintexts = cacheKey && nonRecalledIds.length
+    ? await loadCachedPlaintextBatch(sessionScope, nonRecalledIds, cacheKey).catch(() => new Map())
+    : new Map();
+  const allCached = nonRecalledIds.length > 0 && nonRecalledIds.every((id) => cachedPlaintexts.has(id));
+
+  if (allCached) {
+    for (const item of items) {
+      if (item.is_recalled) {
+        const receiptSummary = cacheReceiptSummary(item.message_id, item.receipt_summary, item.delivery_status || 'sent');
+        decryptedMessages.push({
+          id: item.message_id, clientMessageId: item.client_message_id, from: item.sender_user_id,
+          content: '', msg_type: item.message_type, username: item.username, avatar: item.avatar || '',
+          timestamp: item.created_at, conversationId: item.conversation_id, partnerId: item.partner_id,
+          isE2EE: true, protocolVersion: item.protocol_version || 'e2ee_v1',
+          deliveryStatus: receiptSummary.status, receiptSummary,
+          isRecalled: true, recalledAt: item.recalled_at || null, recalledByUserId: item.recalled_by_user_id || null,
+        });
+        continue;
+      }
+      const plaintext = cachedPlaintexts.get(item.message_id);
+      const receiptSummary = cacheReceiptSummary(item.message_id, item.receipt_summary, item.delivery_status || 'sent');
+      decryptedMessages.push({
+        id: item.message_id, clientMessageId: item.client_message_id, from: item.sender_user_id,
+        content: plaintext, msg_type: item.message_type, username: item.username, avatar: item.avatar || '',
+        timestamp: item.created_at, conversationId: item.conversation_id, partnerId: item.partner_id,
+        isE2EE: true, protocolVersion: item.protocol_version || 'e2ee_v1',
+        deliveryStatus: receiptSummary.status, receiptSummary,
+      });
+      if (['image', 'file'].includes(item.message_type)) {
+        const descriptor = parseEncryptedAttachmentDescriptor(plaintext);
+        if (descriptor) loadEncryptedAttachmentUrl(descriptor).catch(console.error);
+      }
+    }
+    return decryptedMessages;
+  }
+
+  // Phase 2: cache miss – decrypt all, then batch-cache results
+  const sessionSnapshots = new Map();
+  const toCache = [];
+
+  const findSessionFallback = async (senderDeviceId) => {
+    const sessions = await listDeviceSessions(sessionScope);
+    for (const session of sessions) {
+      if (session.remoteDeviceId === senderDeviceId) {
+        return session;
+      }
+    }
+    for (const session of sessions) {
+      if (session.sendingRatchetKeyPair && session.rootKey) {
+        return session;
+      }
+    }
+    return null;
+  };
 
   for (const item of items) {
     if (item.is_recalled) {
       const receiptSummary = cacheReceiptSummary(item.message_id, item.receipt_summary, item.delivery_status || 'sent');
       decryptedMessages.push({
-        id: item.message_id,
-        clientMessageId: item.client_message_id,
-        from: item.sender_user_id,
-        content: '',
-        msg_type: item.message_type,
-        username: item.username,
-        avatar: item.avatar || '',
-        timestamp: item.created_at,
-        conversationId: item.conversation_id,
-        partnerId: item.partner_id,
-        isE2EE: true,
-        protocolVersion: item.protocol_version || 'e2ee_v1',
-        deliveryStatus: receiptSummary.status,
-        receiptSummary,
-        isRecalled: true,
-        recalledAt: item.recalled_at || null,
-        recalledByUserId: item.recalled_by_user_id || null,
+        id: item.message_id, clientMessageId: item.client_message_id, from: item.sender_user_id,
+        content: '', msg_type: item.message_type, username: item.username, avatar: item.avatar || '',
+        timestamp: item.created_at, conversationId: item.conversation_id, partnerId: item.partner_id,
+        isE2EE: true, protocolVersion: item.protocol_version || 'e2ee_v1',
+        deliveryStatus: receiptSummary.status, receiptSummary,
+        isRecalled: true, recalledAt: item.recalled_at || null, recalledByUserId: item.recalled_by_user_id || null,
       });
       continue;
     }
 
     const envelope = parseEnvelopePayload(item.envelope);
     const sessionKey = item.envelope_type === 'local' ? '__local__' : (item.sender_device_id || envelope?.sender_device_id || 'unknown');
-    const storedSession = sessionKey === '__local__'
+    const fromSnapshot = sessionKey !== '__local__' && sessionSnapshots.has(sessionKey);
+    let storedSession = sessionKey === '__local__'
       ? null
-      : (sessionSnapshots.get(sessionKey) || await loadDeviceSession(sessionScope, sessionKey));
+      : (fromSnapshot ? sessionSnapshots.get(sessionKey) : await loadDeviceSession(sessionScope, sessionKey));
+
+    if (!storedSession && sessionKey !== '__local__'
+        && item.sender_user_id !== myUserId) {
+      const fallback = await findSessionFallback(sessionKey);
+      if (fallback) {
+        storedSession = fallback;
+      }
+    }
+    
     let decrypted = {plaintext: ''};
     let isDecryptionError = false;
 
@@ -3040,28 +3114,35 @@ const decryptE2EEMessageList = async (items) => {
       }
     } catch (err) {
       console.warn('Failed to decrypt private history message:', err);
-      decrypted.plaintext = '[解密失败]';
+      const availableKeys = storedSession?.usedMessageKeys ? Object.keys(storedSession.usedMessageKeys).length : 0;
+      const targetPrefix = (envelope?.dh_ratchet_key || 'initial').substring(0, 16);
+      decrypted.plaintext = `[解密失败: ${err.name}] keys=${availableKeys}, target=${targetPrefix}:${envelope?.counter}, recvC=${storedSession?.recvCounter}`;
       isDecryptionError = true;
+    }
+
+    if (!isDecryptionError) {
+      toCache.push({messageId: item.message_id, plaintext: decrypted.plaintext});
     }
 
     const receiptSummary = cacheReceiptSummary(item.message_id, item.receipt_summary, item.delivery_status || 'sent');
     decryptedMessages.push({
-      id: item.message_id,
-      clientMessageId: item.client_message_id,
-      from: item.sender_user_id,
-      content: decrypted.plaintext,
-      msg_type: item.message_type,
-      username: item.username,
-      avatar: item.avatar || '',
-      timestamp: item.created_at,
-      conversationId: item.conversation_id,
-      partnerId: item.partner_id,
-      isE2EE: true,
-      protocolVersion: item.protocol_version || 'e2ee_v1',
-      deliveryStatus: receiptSummary.status,
-      receiptSummary,
-      isDecryptionError,
+      id: item.message_id, clientMessageId: item.client_message_id, from: item.sender_user_id,
+      content: decrypted.plaintext, msg_type: item.message_type, username: item.username, avatar: item.avatar || '',
+      timestamp: item.created_at, conversationId: item.conversation_id, partnerId: item.partner_id,
+      isE2EE: true, protocolVersion: item.protocol_version || 'e2ee_v1',
+      deliveryStatus: receiptSummary.status, receiptSummary, isDecryptionError,
     });
+
+    if (!isDecryptionError && ['image', 'file'].includes(item.message_type)) {
+      const descriptor = parseEncryptedAttachmentDescriptor(decrypted.plaintext);
+      if (descriptor) {
+        loadEncryptedAttachmentUrl(descriptor).catch(console.error);
+      }
+    }
+  }
+
+  if (cacheKey && toCache.length) {
+    saveCachedPlaintextBatch(sessionScope, toCache, cacheKey).catch(console.error);
   }
 
   return decryptedMessages;
@@ -3098,6 +3179,12 @@ const applyPrivateE2EEMessage = async (eventPayload) => {
       await clearStoredSessionState(getSessionStorageScope(), brokenEnvelope.sender_device_id);
     }
     decrypted = {plaintext: '[解密失败]'};
+  }
+
+  if (decrypted.plaintext && decrypted.plaintext !== '[解密失败]') {
+    getCacheEncryptionKey().then((ck) => {
+      if (ck) saveCachedPlaintext(getSessionStorageScope(), eventPayload.message.id, decrypted.plaintext, ck).catch(console.error);
+    });
   }
 
   const partnerId = eventPayload.partner_id;
@@ -3160,6 +3247,13 @@ const applyPrivateE2EEMessage = async (eventPayload) => {
     } else {
       messages.value.push(nextMessage);
       scrollToBottom();
+    }
+
+    if (['image', 'file'].includes(eventPayload.message.message_type)) {
+      const descriptor = parseEncryptedAttachmentDescriptor(decrypted.plaintext);
+      if (descriptor) {
+        loadEncryptedAttachmentUrl(descriptor).catch(console.error);
+      }
     }
     if (!isOwnMessage) {
       acknowledgeE2EEMessage(eventPayload.message.id, 'read');
@@ -3252,31 +3346,76 @@ const saveGroupSenderKeyFromDistribution = async (distributionPayload) => {
 
 const decryptGroupHistoryMessages = async (items, contact) => {
   const sessionScope = getSessionStorageScope();
-  const signalSessionSnapshots = new Map();
   const outputMessages = [];
+
+  // Phase 1: try loading user-visible message plaintexts from cache
+  const cacheKey = await getCacheEncryptionKey();
+  const userMessageIds = items
+    .filter((item) => !item.is_recalled && item.message_type !== 'sender_key_distribution')
+    .map((item) => item.message_id);
+  const cachedPlaintexts = cacheKey && userMessageIds.length
+    ? await loadCachedPlaintextBatch(sessionScope, userMessageIds, cacheKey).catch(() => new Map())
+    : new Map();
+  const allUserMessagesCached = userMessageIds.length > 0 && userMessageIds.every((id) => cachedPlaintexts.has(id));
+
+  if (allUserMessagesCached) {
+    for (const item of items) {
+      if (item.is_recalled) {
+        const receiptSummary = cacheReceiptSummary(item.message_id, item.receipt_summary, item.delivery_status || 'sent');
+        outputMessages.push({
+          id: item.message_id, clientMessageId: item.client_message_id, from: item.sender_user_id,
+          content: '', msg_type: item.message_type, username: item.username, avatar: item.avatar || '',
+          timestamp: item.created_at, conversationId: item.conversation_id, groupId: item.group_id,
+          isE2EE: true, protocolVersion: item.protocol_version || 'e2ee_v1',
+          deliveryStatus: receiptSummary.status, receiptSummary,
+          isRecalled: true, recalledAt: item.recalled_at || null, recalledByUserId: item.recalled_by_user_id || null,
+        });
+        continue;
+      }
+      if (item.message_type === 'sender_key_distribution') continue;
+      const plaintext = cachedPlaintexts.get(item.message_id);
+      const receiptSummary = cacheReceiptSummary(item.message_id, item.receipt_summary, item.delivery_status || 'sent');
+      outputMessages.push({
+        id: item.message_id, clientMessageId: item.client_message_id, from: item.sender_user_id,
+        content: plaintext, msg_type: item.message_type, username: item.username, avatar: item.avatar || '',
+        timestamp: item.created_at, conversationId: item.conversation_id, groupId: item.group_id,
+        isE2EE: true, protocolVersion: item.protocol_version || 'e2ee_v1',
+        deliveryStatus: receiptSummary.status, receiptSummary,
+      });
+      if (['image', 'file'].includes(item.message_type)) {
+        const descriptor = parseEncryptedAttachmentDescriptor(plaintext);
+        if (descriptor) loadEncryptedAttachmentUrl(descriptor).catch(console.error);
+      }
+    }
+
+    if (contact) {
+      const latest = outputMessages[outputMessages.length - 1];
+      if (latest) {
+        if (isMessageRecalled(latest)) {
+          updateGroupConversationRecallPreview(contact.id, latest.timestamp, latest.username, latest.from === myUserId, {bumpConversation: false});
+        } else {
+          updateGroupConversationPreview(contact.id, latest.content, latest.timestamp, latest.username, latest.from === myUserId, latest.msg_type, {bumpConversation: false});
+        }
+      }
+    }
+    return outputMessages;
+  }
+
+  // Phase 2: cache miss – decrypt all, then batch-cache results
+  const signalSessionSnapshots = new Map();
+  const toCache = [];
   let missingSenderKey = false;
 
   for (const item of items) {
     if (item.is_recalled) {
       const receiptSummary = cacheReceiptSummary(item.message_id, item.receipt_summary, item.delivery_status || 'sent');
       outputMessages.push({
-        id: item.message_id,
-        clientMessageId: item.client_message_id,
-        from: item.sender_user_id,
-        content: '',
-        msg_type: item.message_type,
-        username: item.username,
-        avatar: item.avatar || '',
-        timestamp: item.created_at,
-        conversationId: item.conversation_id,
-        groupId: item.group_id,
-        isE2EE: true,
-        protocolVersion: item.protocol_version || 'e2ee_v1',
-        deliveryStatus: receiptSummary.status,
-        receiptSummary,
-        isRecalled: true,
-        recalledAt: item.recalled_at || null,
-        recalledByUserId: item.recalled_by_user_id || null,
+        id: item.message_id, clientMessageId: item.client_message_id, from: item.sender_user_id,
+        content: '', msg_type: item.message_type, username: item.username, avatar: item.avatar || '',
+        timestamp: item.created_at, conversationId: item.conversation_id, groupId: item.group_id,
+        isE2EE: true, protocolVersion: item.protocol_version || 'e2ee_v1',
+        deliveryStatus: receiptSummary.status, receiptSummary,
+        isRecalled: true, recalledAt: item.recalled_at || null, recalledByUserId: item.recalled_by_user_id || null,
       });
       continue;
     }
@@ -3284,7 +3423,8 @@ const decryptGroupHistoryMessages = async (items, contact) => {
     const envelope = parseEnvelopePayload(item.envelope);
     if (item.message_type === 'sender_key_distribution') {
       const sessionKey = item.sender_device_id || envelope?.sender_device_id || 'unknown';
-      const storedSession = signalSessionSnapshots.get(sessionKey) || await loadDeviceSession(sessionScope, sessionKey);
+      const fromSnapshot = signalSessionSnapshots.has(sessionKey);
+      const storedSession = fromSnapshot ? signalSessionSnapshots.get(sessionKey) : resetSessionForReplay(await loadDeviceSession(sessionScope, sessionKey));
       try {
         const decrypted = await decryptEnvelopeForHistory({
           deviceState: currentDeviceState.value,
@@ -3326,24 +3466,29 @@ const decryptGroupHistoryMessages = async (items, contact) => {
       isDecryptionError = true;
     }
 
+    if (!isDecryptionError) {
+      toCache.push({messageId: item.message_id, plaintext});
+    }
+
     const receiptSummary = cacheReceiptSummary(item.message_id, item.receipt_summary, item.delivery_status || 'sent');
     outputMessages.push({
-      id: item.message_id,
-      clientMessageId: item.client_message_id,
-      from: item.sender_user_id,
-      content: plaintext,
-      msg_type: item.message_type,
-      username: item.username,
-      avatar: item.avatar || '',
-      timestamp: item.created_at,
-      conversationId: item.conversation_id,
-      groupId: item.group_id,
-      isE2EE: true,
-      protocolVersion: item.protocol_version || 'e2ee_v1',
-      deliveryStatus: receiptSummary.status,
-      receiptSummary,
-      isDecryptionError,
+      id: item.message_id, clientMessageId: item.client_message_id, from: item.sender_user_id,
+      content: plaintext, msg_type: item.message_type, username: item.username, avatar: item.avatar || '',
+      timestamp: item.created_at, conversationId: item.conversation_id, groupId: item.group_id,
+      isE2EE: true, protocolVersion: item.protocol_version || 'e2ee_v1',
+      deliveryStatus: receiptSummary.status, receiptSummary, isDecryptionError,
     });
+
+    if (!isDecryptionError && ['image', 'file'].includes(item.message_type)) {
+      const descriptor = parseEncryptedAttachmentDescriptor(plaintext);
+      if (descriptor) {
+        loadEncryptedAttachmentUrl(descriptor).catch(console.error);
+      }
+    }
+  }
+
+  if (cacheKey && toCache.length) {
+    saveCachedPlaintextBatch(sessionScope, toCache, cacheKey).catch(console.error);
   }
 
   if (missingSenderKey && contact?.id) {
@@ -3400,6 +3545,8 @@ const applyMessageRecalledEvent = async (eventPayload) => {
   if (!messageMeta.id) {
     return;
   }
+
+  removeCachedPlaintext(getSessionStorageScope(), messageMeta.id).catch(console.error);
 
   if (eventPayload.chat_type === 'private') {
     const partnerId = eventPayload.partner_id;
@@ -3548,6 +3695,13 @@ const applyGroupE2EEMessage = async (eventPayload) => {
       'group_id:', eventPayload.group_id, 'sender:', eventPayload.message.sender_user_id);
     plaintext = '[解密失败]';
   }
+
+  if (plaintext && plaintext !== '[解密失败]') {
+    getCacheEncryptionKey().then((ck) => {
+      if (ck) saveCachedPlaintext(getSessionStorageScope(), eventPayload.message.id, plaintext, ck).catch(console.error);
+    });
+  }
+
   const isOwnMessage = eventPayload.message.sender_user_id === myUserId;
   if (isOwnMessage && eventPayload.message.client_message_id) {
     await removeOutboxMessage(getSessionStorageScope(), eventPayload.message.client_message_id);
@@ -3594,6 +3748,13 @@ const applyGroupE2EEMessage = async (eventPayload) => {
       messages.value.push(nextMessage);
       scrollToBottom();
     }
+
+    if (['image', 'file'].includes(eventPayload.message.message_type)) {
+      const descriptor = parseEncryptedAttachmentDescriptor(plaintext);
+      if (descriptor) {
+        loadEncryptedAttachmentUrl(descriptor).catch(console.error);
+      }
+    }
     if (!isOwnMessage) {
       acknowledgeE2EEMessage(eventPayload.message.id, 'read');
     }
@@ -3607,9 +3768,11 @@ const loadE2EEConversationHistory = async (contact) => {
   const response = await axios.get(`${API_BASE}/e2ee/conversations/${contact.e2eeConversationId}/messages`, {
     headers: {Authorization: `Bearer ${token}`}
   });
+  
+  const rawMessages = response.data || [];
   let decryptedMessages = contact.type === 'group'
-    ? await decryptGroupHistoryMessages(response.data || [], contact)
-    : await decryptE2EEMessageList(response.data || []);
+    ? await decryptGroupHistoryMessages(rawMessages, contact)
+    : await decryptE2EEMessageList(rawMessages);
   decryptedMessages = await mergeConversationOutboxMessages(decryptedMessages, contact);
   messages.value = decryptedMessages;
 
@@ -3634,7 +3797,10 @@ const syncE2EEInbox = async () => {
   const response = await axios.get(`${API_BASE}/e2ee/inbox`, {
     headers: {Authorization: `Bearer ${token}`}
   });
-  for (const item of response.data || []) {
+  
+  const items = response.data || [];
+  
+  for (const item of items) {
     const eventPayload = {
       type: 'message.new',
       chat_type: item.chat_type,
@@ -5717,12 +5883,23 @@ const resolveAttachmentUrl = async (content) => {
 const getFileUrl = (content) => {
   const descriptor = parseEncryptedAttachmentDescriptor(content);
   if (descriptor) {
-    if (!attachmentObjectUrls[descriptor.blob_id]) {
-      loadEncryptedAttachmentUrl(descriptor).catch(console.error);
+    if (attachmentObjectUrls[descriptor.blob_id]) return attachmentObjectUrls[descriptor.blob_id];
+    const errorCount = attachmentLoadErrors[descriptor.blob_id] || 0;
+    if (errorCount < 3 && !attachmentLoadPromises.has(descriptor.blob_id)) {
+      loadEncryptedAttachmentUrl(descriptor).catch((err) => {
+        console.error('[E2EE] attachment load failed:', descriptor.blob_id, err);
+        attachmentLoadErrors[descriptor.blob_id] = errorCount + 1;
+      });
     }
-    return attachmentObjectUrls[descriptor.blob_id] || '';
+    return '';
   }
   return '';
+};
+
+const isAttachmentLoadFailed = (content) => {
+  const descriptor = parseEncryptedAttachmentDescriptor(content);
+  if (!descriptor) return true;
+  return (attachmentLoadErrors[descriptor.blob_id] || 0) >= 3;
 };
 
 const getFileName = (content) => {
@@ -7594,7 +7771,6 @@ const kickMember = async (userId) => {
 .msg-sender-name {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
   max-width: 240px;
   font-size: 13px;
   font-weight: 700;
@@ -7603,17 +7779,6 @@ const kickMember = async (userId) => {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-
-.msg-sender-name::before {
-  content: '';
-  width: 7px;
-  height: 7px;
-  border-radius: 999px;
-  background: currentColor;
-  flex-shrink: 0;
-  opacity: 0.92;
-  box-shadow: 0 0 0 4px rgba(255, 255, 255, 0.82);
 }
 
 .message-content {
@@ -7733,6 +7898,31 @@ const kickMember = async (userId) => {
   cursor: pointer;
 }
 
+.image-loading-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 120px;
+  min-height: 80px;
+  border-radius: 16px;
+  background: rgba(120, 120, 140, 0.08);
+  color: rgba(100, 100, 120, 0.7);
+  font-size: 13px;
+}
+
+.image-loading-placeholder .load-failed-text {
+  opacity: 0.65;
+}
+
+.image-loading-placeholder .loading-spinner-text {
+  animation: pulse-opacity 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse-opacity {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 1; }
+}
+
 .media-bubble {
   padding: 8px;
   gap: 8px;
@@ -7749,61 +7939,6 @@ const kickMember = async (userId) => {
   color: rgba(255, 255, 255, 0.96);
   box-shadow: 0 6px 14px rgba(15, 23, 42, 0.16);
   backdrop-filter: blur(6px);
-}
-
-.media-meta-overlay {
-  position: absolute;
-  left: 10px;
-  right: 10px;
-  bottom: 10px;
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  width: fit-content;
-  max-width: calc(100% - 20px);
-  padding: 6px 9px;
-  border-radius: 999px;
-  background: linear-gradient(90deg, rgba(7, 12, 20, 0.76) 0%, rgba(7, 12, 20, 0.62) 72%, rgba(7, 12, 20, 0.28) 100%);
-  box-shadow: 0 12px 24px rgba(15, 23, 42, 0.24);
-  backdrop-filter: blur(8px);
-}
-
-.media-meta-name {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  max-width: 180px;
-  padding: 5px 10px;
-  border-radius: 999px;
-  font-size: 11px;
-  font-weight: 700;
-  line-height: 1;
-  color: rgba(255, 255, 255, 0.99) !important;
-  background: rgba(255, 255, 255, 0.14);
-  border: 1px solid rgba(255, 255, 255, 0.16);
-  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.32);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.media-meta-name::before {
-  content: '';
-  width: 8px;
-  height: 8px;
-  border-radius: 999px;
-  background: var(--sender-accent, #ffffff);
-  flex-shrink: 0;
-  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.12);
-}
-
-.media-meta-time {
-  flex-shrink: 0;
-  font-size: 11px;
-  font-weight: 600;
-  line-height: 1;
-  color: rgba(255, 255, 255, 0.9);
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.24);
 }
 
 .message-file {

@@ -156,7 +156,8 @@ export const clearStoredDeviceState = async (scopeKey = 'default') => {
 };
 
 export const loadStoredSessionState = async (scopeKey = 'default', remoteDeviceId) => {
-  return await getValue(buildSessionKey(scopeKey, remoteDeviceId)) || null;
+  const value = await getValue(buildSessionKey(scopeKey, remoteDeviceId)) || null;
+  return value;
 };
 
 export const saveStoredSessionState = async (scopeKey = 'default', remoteDeviceId, value) => {
@@ -218,4 +219,94 @@ export const listOutboxMessages = async (scopeKey = 'default') => {
 
 export const clearOutboxMessages = async (scopeKey = 'default') => {
   return await deleteValuesByPrefix(`outbox:${scopeKey}:`);
+};
+
+// ---------------------------------------------------------------------------
+// Plaintext cache – AES-GCM encrypted at rest
+// ---------------------------------------------------------------------------
+
+const buildPlaintextCacheKey = (scopeKey = 'default', messageId = '0') => `plaintext_cache:${scopeKey}:${messageId}`;
+
+const importCacheKey = async (rawKeyBytes) => {
+  return await crypto.subtle.importKey('raw', rawKeyBytes, {name: 'AES-GCM'}, false, ['encrypt', 'decrypt']);
+};
+
+const encryptCacheEntry = async (aesKey, plaintext) => {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const encoded = new TextEncoder().encode(plaintext);
+  const ciphertext = await crypto.subtle.encrypt({name: 'AES-GCM', iv}, aesKey, encoded);
+  return {iv: Array.from(iv), ct: Array.from(new Uint8Array(ciphertext))};
+};
+
+const decryptCacheEntry = async (aesKey, entry) => {
+  const iv = new Uint8Array(entry.iv);
+  const ct = new Uint8Array(entry.ct);
+  const plainBuffer = await crypto.subtle.decrypt({name: 'AES-GCM', iv}, aesKey, ct);
+  return new TextDecoder().decode(plainBuffer);
+};
+
+export const saveCachedPlaintext = async (scopeKey, messageId, plaintext, cacheKeyBytes) => {
+  const aesKey = await importCacheKey(cacheKeyBytes);
+  const encrypted = await encryptCacheEntry(aesKey, plaintext);
+  await setValue(buildPlaintextCacheKey(scopeKey, messageId), encrypted);
+};
+
+export const saveCachedPlaintextBatch = async (scopeKey, entries, cacheKeyBytes) => {
+  if (!entries.length) return;
+
+  const aesKey = await importCacheKey(cacheKeyBytes);
+  const prepared = [];
+  for (const entry of entries) {
+    const enc = await encryptCacheEntry(aesKey, entry.plaintext);
+    prepared.push({key: buildPlaintextCacheKey(scopeKey, entry.messageId), value: enc});
+  }
+
+  const db = await openDatabase();
+  await new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, 'readwrite');
+    const store = tx.objectStore(STORE_NAME);
+    for (const item of prepared) {
+      store.put(normalizeForStorage(item.value), item.key);
+    }
+    tx.oncomplete = () => { db.close(); resolve(); };
+    tx.onerror = () => { db.close(); reject(tx.error); };
+    tx.onabort = () => { db.close(); reject(tx.error); };
+  });
+};
+
+export const loadCachedPlaintextBatch = async (scopeKey, messageIds, cacheKeyBytes) => {
+  if (!messageIds.length) return new Map();
+
+  const db = await openDatabase();
+  const rawEntries = await new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, 'readonly');
+    const store = tx.objectStore(STORE_NAME);
+    const collected = new Map();
+    for (const msgId of messageIds) {
+      const req = store.get(buildPlaintextCacheKey(scopeKey, msgId));
+      req.onsuccess = () => { if (req.result) collected.set(msgId, req.result); };
+    }
+    tx.oncomplete = () => { db.close(); resolve(collected); };
+    tx.onerror = () => { db.close(); reject(tx.error); };
+    tx.onabort = () => { db.close(); reject(tx.error); };
+  });
+
+  const aesKey = await importCacheKey(cacheKeyBytes);
+  const results = new Map();
+  for (const [msgId, entry] of rawEntries) {
+    try {
+      results.set(msgId, await decryptCacheEntry(aesKey, entry));
+    } catch {
+      // skip corrupted entries silently
+    }
+  }
+  return results;
+};
+
+export const removeCachedPlaintext = async (scopeKey, messageId) => {
+  await deleteValue(buildPlaintextCacheKey(scopeKey, messageId));
+};
+
+export const clearCachedPlaintexts = async (scopeKey = 'default') => {
+  return await deleteValuesByPrefix(`plaintext_cache:${scopeKey}:`);
 };

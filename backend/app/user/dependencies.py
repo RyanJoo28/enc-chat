@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from hashlib import sha256
 from typing import cast
 
 from fastapi import Depends, HTTPException, status
@@ -14,6 +15,10 @@ from .manager import SECRET_KEY, ALGORITHM
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/user/login")
 optional_oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/user/login", auto_error=False)
 TOKEN_SECRET = cast(str, SECRET_KEY)
+
+
+def _hash_token(token: str) -> str:
+    return sha256(token.encode()).hexdigest()
 
 
 @dataclass
@@ -38,7 +43,7 @@ def resolve_auth_context(token: str, db: Session) -> AuthContext:
     )
 
     # 注销后的 Token 会被加入黑名单，后续请求直接拒绝。
-    blacklisted = db.query(TokenBlacklist).filter(TokenBlacklist.token == token).first()
+    blacklisted = db.query(TokenBlacklist).filter(TokenBlacklist.token == _hash_token(token)).first()
     if blacklisted:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

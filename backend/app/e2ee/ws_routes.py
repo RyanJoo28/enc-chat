@@ -69,7 +69,18 @@ async def e2ee_chat_endpoint(websocket: WebSocket, ticket: str = Query(...)):
     try:
         while True:
             data = await websocket.receive_text()
-            logger.info(f"WS Payload received: {data[:200]}")
+            try:
+                preview = json.loads(data)
+                msg_type = preview.get("type", "unknown")
+            except (json.JSONDecodeError, TypeError):
+                msg_type = "invalid_json"
+            logger.info(build_log_payload(
+                "ws_message_received",
+                ws_payload_type=msg_type,
+                ws_payload_bytes=len(data.encode("utf-8")),
+                user_id=user_id,
+                device_id=current_device_id,
+            ))
             if len(data.encode("utf-8")) > WS_MAX_MESSAGE_BYTES:
                 await websocket.send_text(json.dumps({"type": "error", "detail": "消息过大"}, ensure_ascii=False))
                 await websocket.close(code=status.WS_1009_MESSAGE_TOO_BIG)
