@@ -21,9 +21,13 @@ server {
   root /usr/share/nginx/html;
   index index.html;
 
+  # 使用 Docker 内嵌 DNS，避免 nginx 在启动时解析上游主机名失败而崩溃。
+  resolver 127.0.0.11 valid=30s ipv6=off;
+
   # WebSocket 代理
   location /api/chat/ws/ {
-    proxy_pass http://${BACKEND_UPSTREAM};
+    set $backend http://${BACKEND_UPSTREAM};
+    proxy_pass $backend;
     proxy_http_version 1.1;
     proxy_set_header Host $host;
     proxy_set_header X-Real-IP $remote_addr;
@@ -35,7 +39,8 @@ server {
   }
 
   location /api/e2ee/ws {
-    proxy_pass http://${BACKEND_UPSTREAM};
+    set $backend http://${BACKEND_UPSTREAM};
+    proxy_pass $backend;
     proxy_http_version 1.1;
     proxy_set_header Host $host;
     proxy_set_header X-Real-IP $remote_addr;
@@ -48,7 +53,8 @@ server {
 
   # HTTP API 代理
   location /api/ {
-    proxy_pass http://${BACKEND_UPSTREAM};
+    set $backend http://${BACKEND_UPSTREAM};
+    proxy_pass $backend;
     proxy_http_version 1.1;
     proxy_set_header Host $host;
     proxy_set_header X-Real-IP $remote_addr;

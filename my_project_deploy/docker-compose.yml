@@ -38,6 +38,7 @@ services:
       DB_ENCRYPTION_KEY: ${DB_ENCRYPTION_KEY:-}
       E2EE_PRIVATE_ENABLED: ${E2EE_PRIVATE_ENABLED:-true}
       E2EE_GROUP_ENABLED: ${E2EE_GROUP_ENABLED:-true}
+      REFRESH_COOKIE_SECURE: "true"
       APP_DATA_DIR: /data
       AVATAR_DIR: /data/avatars
       GROUP_AVATAR_DIR: /data/group_avatars

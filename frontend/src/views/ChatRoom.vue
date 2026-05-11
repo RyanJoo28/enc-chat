@@ -3424,7 +3424,7 @@ const decryptGroupHistoryMessages = async (items, contact) => {
     if (item.message_type === 'sender_key_distribution') {
       const sessionKey = item.sender_device_id || envelope?.sender_device_id || 'unknown';
       const fromSnapshot = signalSessionSnapshots.has(sessionKey);
-      const storedSession = fromSnapshot ? signalSessionSnapshots.get(sessionKey) : resetSessionForReplay(await loadDeviceSession(sessionScope, sessionKey));
+      const storedSession = fromSnapshot ? signalSessionSnapshots.get(sessionKey) : await loadDeviceSession(sessionScope, sessionKey);
       try {
         const decrypted = await decryptEnvelopeForHistory({
           deviceState: currentDeviceState.value,
@@ -4916,7 +4916,7 @@ const selectChat = async (contact) => {
     currentChatType.value = previousChatType;
     messages.value = previousMessages;
     inputText.value = previousInput;
-    ElMessage.error(translateError(e.response?.data?.detail) || 'Failed');
+    ElMessage.error(translateError(e.response?.data?.detail) || e.message || 'Failed');
     console.error(e);
     return false;
   }
@@ -6746,7 +6746,7 @@ const submitCreateGroup = async () => {
     createGroupVisible.value = false;
     ElMessage.success(t('groupCreated'));
   } catch (e) {
-    ElMessage.error("Failed");
+    ElMessage.error(translateError(e.response?.data?.detail) || "Failed");
   }
 };
 
